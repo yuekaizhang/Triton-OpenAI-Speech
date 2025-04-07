@@ -1,0 +1,11 @@
+services:
+  api-server:
+    build: .
+    container_name: openai_api_server
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      /bin/bash -c "python tts_server.py --url http://host.docker.internal:8000 --ref_audios_dir ./"
+
