@@ -11,7 +11,7 @@ from pydantic import BaseModel
 import uvicorn
 from pathlib import Path
 from typing import Optional # Added import
-
+from tts_frontend import TextNormalizer
 def register_voice(ref_audios_path):
     VOICE_CONFIG = {}
     for ref_audio in os.listdir(ref_audios_path):
@@ -29,6 +29,7 @@ class TTSRequest(BaseModel):
     input: str
     voice: str
     instructions: Optional[str] = None # Optional field if needed
+    response_format: Optional[str] = "pcm" # Added: default to raw pcm stream, allow "wav"
 
 def prepare_tts_request(
     waveform,
@@ -73,58 +74,158 @@ def prepare_tts_request(
 
 
 app = FastAPI()
+text_normalizer = TextNormalizer()
 
-@app.post("/audio/speech")
-async def generate_speech(request_data: TTSRequest):
-    if request_data.voice not in VOICE_CONFIG:
-        raise HTTPException(status_code=400, detail=f"Voice '{request_data.voice}' not found.")
+async def _stream_audio_generator(request_data: TTSRequest):
+    """Async generator to yield audio numpy arrays (int16) for each sentence."""
+    # Initial checks (voice, ref audio) are now done in the main endpoint.
+
     config = VOICE_CONFIG[request_data.voice]
     reference_audio_path = config["reference_audio"]
     reference_text = config["reference_text"]
-    target_text = request_data.input
+    request_model_name = request_data.model
+    triton_url = f"{TRITON_SERVER_URL}/v2/models/{request_model_name}/infer"
+    target_text_list = text_normalizer.text_normalize(request_data.input)
 
     try:
-
+        # Read reference audio once
         waveform, sr = sf.read(reference_audio_path)
+        # Sample rate check already done in the main endpoint
 
-        if sr != DEFAULT_SAMPLE_RATE:
-             raise HTTPException(status_code=500, detail=f"Reference audio sample rate ({sr}) does not match expected ({DEFAULT_SAMPLE_RATE}). Resampling not implemented yet.")
-
-
+        # Ensure reference samples are float32 as expected by prepare_tts_request
         samples = np.array(waveform, dtype=np.float32)
 
-        triton_request_data = prepare_tts_request(samples, reference_text, target_text, DEFAULT_SAMPLE_RATE)
-        request_model_name = request_data.model
-        triton_url = f"{TRITON_SERVER_URL}/v2/models/{request_model_name}/infer"
+        for target_text in target_text_list:
+            print(f"Generating audio array for: {target_text}") # Log start of processing
+            triton_request_data = prepare_tts_request(samples, reference_text, target_text, DEFAULT_SAMPLE_RATE)
 
-        rsp = requests.post(
-            triton_url,
-            headers={"Content-Type": "application/json"},
-            json=triton_request_data,
-        )
-        rsp.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
-        result = rsp.json()
+            try:
+                rsp = requests.post(
+                    triton_url,
+                    headers={"Content-Type": "application/json"},
+                    json=triton_request_data,
+                    # Consider adding a timeout
+                    # timeout=30 # Example: 30 seconds
+                )
+                rsp.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+                result = rsp.json()
 
-        if "error" in result:
-             raise HTTPException(status_code=500, detail=f"Triton server error: {result['error']}")
+                if "error" in result:
+                    print(f"Triton server error for text '{target_text}': {result['error']}")
+                    continue # Skip yielding audio for this failed sentence
 
-        if not result.get("outputs") or not result["outputs"][0].get("data"):
-             raise HTTPException(status_code=500, detail="Invalid response structure from Triton server.")
+                if not result.get("outputs") or not result["outputs"][0].get("data"):
+                    print(f"Invalid response structure from Triton for text '{target_text}'")
+                    continue # Skip yielding audio for this invalid response
 
-        audio_data = result["outputs"][0]["data"]
-        audio_array = np.array(audio_data, dtype=np.float32)
-        audio_buffer = io.BytesIO()
-        sf.write(audio_buffer, audio_array, DEFAULT_SAMPLE_RATE, format='WAV', subtype='PCM_16')
-        audio_buffer.seek(0)
+                audio_data = result["outputs"][0]["data"]
+                # Assuming Triton returns float32 data
+                audio_array = np.array(audio_data, dtype=np.float32)
 
-        return StreamingResponse(audio_buffer, media_type="audio/wav")
+                # Convert to 16-bit PCM
+                audio_array = np.clip(audio_array, -1.0, 1.0)
+                pcm_data = (audio_array * 32767).astype(np.int16)
 
-    except sf.SoundFileError:
-        raise HTTPException(status_code=501, detail=f"Could not read reference audio file: {reference_audio_path}")
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=503, detail=f"Could not connect to Triton server: {e}")
+                print(f"Yielding numpy array with {len(pcm_data)} samples for: {target_text[:10]}...")
+                yield pcm_data # Yield the numpy array directly
+
+            except requests.exceptions.Timeout:
+                print(f"Triton request timed out for text '{target_text[:50]}...'")
+                raise HTTPException(status_code=504, detail="Triton server request timed out during streaming.")
+            except requests.exceptions.RequestException as e:
+                print(f"Could not connect to Triton server for text '{target_text[:50]}...': {e}")
+                raise HTTPException(status_code=503, detail=f"Could not connect to Triton server during streaming: {e}")
+            except Exception as e:
+                print(f"An unexpected error occurred processing text '{target_text[:50]}...': {str(e)}")
+                raise HTTPException(status_code=502, detail=f"An unexpected error occurred during streaming: {str(e)}")
+
+        print("Finished generating all sentence arrays.")
+
+    except sf.SoundFileError as e:
+         print(f"Error reading reference audio within generator: {e}")
+         raise HTTPException(status_code=501, detail=f"Could not read reference audio file during streaming: {reference_audio_path}")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"An unexpected error occurred: {str(e)}")
+        print(f"Unexpected error at start of/during generator execution: {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected generator error: {str(e)}")
+
+
+@app.post("/audio/speech")
+async def generate_speech(request_data: TTSRequest):
+    # --- Perform initial checks --- (same as before)
+    if request_data.voice not in VOICE_CONFIG:
+        raise HTTPException(status_code=400, detail=f"Voice '{request_data.voice}' not found.")
+
+    config = VOICE_CONFIG[request_data.voice]
+    reference_audio_path = config["reference_audio"]
+
+    try:
+        if not os.path.exists(reference_audio_path):
+             raise FileNotFoundError
+        info = sf.info(reference_audio_path)
+        if info.samplerate != DEFAULT_SAMPLE_RATE:
+             raise HTTPException(status_code=500, detail=f"Reference audio sample rate ({info.samplerate}) does not match expected ({DEFAULT_SAMPLE_RATE}). Resampling not implemented yet.")
+    except FileNotFoundError:
+         raise HTTPException(status_code=501, detail=f"Reference audio file not found: {reference_audio_path}")
+    except sf.SoundFileError:
+         raise HTTPException(status_code=501, detail=f"Could not read reference audio file info (invalid format or corrupt?): {reference_audio_path}")
+    except Exception as e:
+         raise HTTPException(status_code=500, detail=f"Error checking reference audio file: {str(e)}")
+
+    # --- Handle response format --- 
+    response_format = request_data.response_format.lower() if request_data.response_format else "pcm"
+
+    if response_format == "pcm":
+        print("Streaming raw PCM audio.")
+        media_type = f"audio/L16;rate={DEFAULT_SAMPLE_RATE};channels=1"
+        
+        async def pcm_byte_stream_generator():
+            """Consumes numpy arrays from the main generator and yields bytes."""
+            async for pcm_array in _stream_audio_generator(request_data):
+                 yield pcm_array.tobytes()
+            print("Finished streaming PCM bytes.")
+        
+        return StreamingResponse(pcm_byte_stream_generator(), media_type=media_type)
+
+    elif response_format == "wav":
+        print("Generating buffered WAV file.")
+        all_audio_arrays = []
+        try:
+            async for pcm_array in _stream_audio_generator(request_data):
+                all_audio_arrays.append(pcm_array)
+        except HTTPException as e:
+             # If the generator itself raises an HTTP exception, re-raise it
+             raise e
+        except Exception as e:
+            # Catch unexpected errors during array collection
+            print(f"Unexpected error collecting audio arrays for WAV: {e}")
+            raise HTTPException(status_code=500, detail=f"Error generating full WAV file: {str(e)}")
+        
+        if not all_audio_arrays:
+            print("No audio data generated, returning empty WAV.")
+            # Return an empty WAV or perhaps an error?
+            # Let's return a minimal valid empty WAV
+            wav_buffer = io.BytesIO()
+            sf.write(wav_buffer, np.array([], dtype=np.int16), DEFAULT_SAMPLE_RATE, format='WAV', subtype='PCM_16')
+            wav_buffer.seek(0)
+            return StreamingResponse(wav_buffer, media_type="audio/wav")
+            # Alternatively: raise HTTPException(status_code=500, detail="Failed to generate any audio data")
+
+        try:
+            final_audio_array = np.concatenate(all_audio_arrays)
+            print(f"Concatenated audio array shape: {final_audio_array.shape}")
+            
+            wav_buffer = io.BytesIO()
+            sf.write(wav_buffer, final_audio_array, DEFAULT_SAMPLE_RATE, format='WAV', subtype='PCM_16')
+            wav_buffer.seek(0)
+            
+            print("Returning complete WAV file.")
+            return StreamingResponse(wav_buffer, media_type="audio/wav")
+        except Exception as e:
+            print(f"Error concatenating or writing WAV file: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to create final WAV file: {str(e)}")
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported response_format: '{request_data.response_format}'. Supported formats: 'pcm', 'wav'.")
 
 
 if __name__ == "__main__":
