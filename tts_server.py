@@ -126,7 +126,6 @@ async def _stream_audio_generator(request_data: TTSRequest):
                 audio_array = np.clip(audio_array, -1.0, 1.0)
                 pcm_data = (audio_array * 32767).astype(np.int16)
 
-                print(f"Yielding numpy array with {len(pcm_data)} samples for: {target_text[:10]}...")
                 yield pcm_data # Yield the numpy array directly
 
             except requests.exceptions.Timeout:
@@ -172,7 +171,12 @@ async def generate_speech(request_data: TTSRequest):
          raise HTTPException(status_code=500, detail=f"Error checking reference audio file: {str(e)}")
 
     # --- Handle response format --- 
-    response_format = request_data.response_format.lower() if request_data.response_format else "pcm"
+    if request_data.response_format:
+        response_format = request_data.response_format.lower()
+        if response_format not in ["pcm", "wav"]:
+            response_format = "wav"
+    else:
+        response_format = "wav"
 
     if response_format == "pcm":
         print("Streaming raw PCM audio.")
