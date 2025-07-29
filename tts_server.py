@@ -35,7 +35,6 @@ def prepare_tts_request(
     waveform,
     reference_text,
     target_text,
-    sample_rate,
 ):
     assert len(waveform.shape) == 1, "waveform should be 1D"
     lengths = np.array([[len(waveform)]], dtype=np.int32)
@@ -97,7 +96,7 @@ async def _stream_audio_generator(request_data: TTSRequest):
 
         for target_text in target_text_list:
             print(f"Generating audio array for: {target_text}") # Log start of processing
-            triton_request_data = prepare_tts_request(samples, reference_text, target_text, DEFAULT_SAMPLE_RATE)
+            triton_request_data = prepare_tts_request(samples, reference_text, target_text)
 
             try:
                 rsp = requests.post(
@@ -161,8 +160,8 @@ async def generate_speech(request_data: TTSRequest):
         if not os.path.exists(reference_audio_path):
              raise FileNotFoundError
         info = sf.info(reference_audio_path)
-        if info.samplerate != DEFAULT_SAMPLE_RATE:
-             raise HTTPException(status_code=500, detail=f"Reference audio sample rate ({info.samplerate}) does not match expected ({DEFAULT_SAMPLE_RATE}). Resampling not implemented yet.")
+        if info.samplerate != 16000:
+             raise HTTPException(status_code=500, detail=f"Reference audio sample rate ({info.samplerate}) does not match expected 16000. Resampling not implemented yet.")
     except FileNotFoundError:
          raise HTTPException(status_code=501, detail=f"Reference audio file not found: {reference_audio_path}")
     except sf.SoundFileError:
@@ -249,6 +248,9 @@ if __name__ == "__main__":
 
     print(f"Starting FastAPI server on {args.host}:{args.port}")
     print(f"Using Triton server at {TRITON_SERVER_URL}")
-    print(f"Available voices: {list(VOICE_CONFIG.keys())}")
+    voice_list = list(VOICE_CONFIG.keys())
+    if len(voice_list) == 0:
+        raise ValueError("No voice found in the reference audio directory")
+    print(f"Available voices: {voice_list}")
 
     uvicorn.run(app, host=args.host, port=args.port) 

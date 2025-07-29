@@ -1,0 +1,59 @@
+# python3 tts_server.py --url http://localhost:8000 --ref_audios_dir ./ref_audios/ --port 10086 --default_sample_rate 24000
+OPENAI_API_BASE="http://localhost:10086"
+
+curl $OPENAI_API_BASE/audio/speech \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "cosyvoice2",
+    "input": "身临其境，换新体验。塑造开源语音合成新范式，让智能语音更自然。",
+    "voice": "default_zh",
+    "response_format": "wav"
+    }' \
+    --output output.wav
+
+curl $OPENAI_API_BASE/audio/speech \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "cosyvoice2",
+    "input": "身临其境，换新体验。塑造开源语音合成新范式，让智能语音更自然。",
+    "voice": "wukong",
+    "response_format": "wav"
+    }' \
+    --output output2.wav
+
+curl $OPENAI_API_BASE/audio/speech \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "cosyvoice2",
+    "input": "身临其境，换新体验。塑造开源语音合成新范式，让智能语音更自然。",
+    "voice": "leijun",
+    "response_format": "wav"
+    }' \
+    --output output3.wav
+
+# output3 from pcm
+curl $OPENAI_API_BASE/audio/speech \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "cosyvoice2",
+    "input": "身临其境，换新体验。塑造开源语音合成新范式，让智能语音更自然。",
+    "voice": "leijun",
+    "response_format": "pcm"
+    }' | \
+sox -t raw -r 16000 -e signed-integer -b 16 -c 1 - output3_from_pcm.wav
+
+# load input from long_input.txt
+input=$(cat long_input.txt)
+# Construct JSON payload using jq
+json_payload=$(jq -n --arg input_text "$input" '{model: "cosyvoice2", input: $input_text, voice: "default_zh", response_format: "wav"}')
+
+curl $OPENAI_API_BASE/audio/speech \
+    -H "Content-Type: application/json" \
+    -d "$json_payload" \
+    --output output4.wav
+
+json_payload=$(jq -n --arg input_text "$input" '{model: "cosyvoice2", input: $input_text, voice: "default_zh", response_format: "pcm"}')
+curl $OPENAI_API_BASE/audio/speech \
+    -H "Content-Type: application/json" \
+    -d "$json_payload" | \
+sox -t raw -r 16000 -e signed-integer -b 16 -c 1 - output4_from_pcm.wav

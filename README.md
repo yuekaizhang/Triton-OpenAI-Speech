@@ -7,7 +7,7 @@ Before starting, launch one of the supported ASR/TTS services using Docker Compo
 | --- |  -- |
 | [Spark-TTS](https://github.com/SparkAudio/Spark-TTS/tree/main/runtime/triton_trtllm) | Yes |
 |[F5-TTS](https://github.com/SWivid/F5-TTS/tree/main/src/f5_tts/runtime/triton_trtllm)| Yes |
-|[Whisper](https://github.com/k2-fsa/sherpa/tree/master/triton/whisper)| No |
+|[Cosyvoice2](https://github.com/FunAudioLLM/CosyVoice/tree/main/runtime/triton_trtllm)| Yes |
 
 Then, launch the OpenAI-compatible API bridge server.
 ```sh
